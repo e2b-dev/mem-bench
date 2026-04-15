@@ -154,220 +154,185 @@ impl Drop for ChildProcess {
 
 // ─── Benchmarks ───────────────────────────────────────────────────────────────
 
-/// 1. process_vm_readv: copy from a forked child's mmap region into a local
-///    mmap region via the syscall.
-fn bench_process_vm_readv(c: &mut Criterion) {
-    let mut group = c.benchmark_group("process_vm_readv");
+/// All five copy mechanisms in one Criterion group, so Criterion generates
+/// per-size comparison plots across methods.
+///
+/// Group name is the page-size label ("4k" or "2m").
+/// Function dimension (first BenchmarkId argument) is the method name.
+/// Parameter dimension (second BenchmarkId argument) is the copy size.
+///
+/// fd_to_fd has no huge-page variant (file page-cache always uses 4 KiB pages)
+/// and is therefore only registered in the "4k" group.
+fn bench_copy(c: &mut Criterion, page_size: PageSize) {
+    let mut group = c.benchmark_group(page_size.label());
 
     for size in bench_sizes() {
-        for &page_size in PageSize::ALL {
-            if !page_size.is_size_compatible(size) {
-                continue;
-            }
-            group.throughput(Throughput::Bytes(size as u64));
-            group.bench_with_input(
-                BenchmarkId::new(page_size.label(), size),
-                &(size, page_size),
-                |b, &(size, page_size)| {
-                    let child = ChildProcess::spawn(size, page_size);
-                    let dst = unsafe { anon_mmap(size, page_size) };
-
-                    b.iter(|| {
-                        let mut done = 0usize;
-                        while done < size {
-                            let local = iovec {
-                                iov_base: (dst as *mut u8).wrapping_add(done) as *mut c_void,
-                                iov_len: size - done,
-                            };
-                            let remote = iovec {
-                                iov_base: (child.remote_ptr as *mut u8).wrapping_add(done)
-                                    as *mut c_void,
-                                iov_len: size - done,
-                            };
-                            let n = unsafe {
-                                libc::process_vm_readv(child.pid, &local, 1, &remote, 1, 0)
-                            };
-                            assert!(
-                                n > 0,
-                                "process_vm_readv failed after {done} bytes: {}",
-                                std::io::Error::last_os_error(),
-                            );
-                            done += n as usize;
-                        }
-                    });
-
-                    unsafe { libc::munmap(dst, size) };
-                    drop(child);
-                },
-            );
+        if !page_size.is_size_compatible(size) {
+            continue;
         }
-    }
-    group.finish();
-}
 
-/// 2. mmap → file: write an anonymous mmap region into a real on-disk file
-///    via pwrite(2). The page size parameter controls the source mmap; the
-///    destination file always uses regular page-cache pages.
-fn bench_mmap_to_file(c: &mut Criterion) {
-    let mut group = c.benchmark_group("mmap_to_file");
+        group.throughput(Throughput::Bytes(size as u64));
 
-    for size in bench_sizes() {
-        for &page_size in PageSize::ALL {
-            if !page_size.is_size_compatible(size) {
-                continue;
-            }
-            group.throughput(Throughput::Bytes(size as u64));
+        // ── process_vm_readv ──────────────────────────────────────────────────
+        group.bench_with_input(
+            BenchmarkId::new("process_vm_readv", size),
+            &(size, page_size),
+            |b, &(size, page_size)| {
+                let child = ChildProcess::spawn(size, page_size);
+                let dst = unsafe { anon_mmap(size, page_size) };
+
+                b.iter(|| {
+                    let mut done = 0usize;
+                    while done < size {
+                        let local = iovec {
+                            iov_base: (dst as *mut u8).wrapping_add(done) as *mut c_void,
+                            iov_len: size - done,
+                        };
+                        let remote = iovec {
+                            iov_base: (child.remote_ptr as *mut u8).wrapping_add(done)
+                                as *mut c_void,
+                            iov_len: size - done,
+                        };
+                        let n = unsafe {
+                            libc::process_vm_readv(child.pid, &local, 1, &remote, 1, 0)
+                        };
+                        assert!(
+                            n > 0,
+                            "process_vm_readv failed after {done} bytes: {}",
+                            std::io::Error::last_os_error(),
+                        );
+                        done += n as usize;
+                    }
+                });
+
+                unsafe { libc::munmap(dst, size) };
+                drop(child);
+            },
+        );
+
+        // ── mmap → file (pwrite) ──────────────────────────────────────────────
+        group.bench_with_input(
+            BenchmarkId::new("mmap_to_file", size),
+            &(size, page_size),
+            |b, &(size, page_size)| {
+                let src = unsafe { anon_mmap(size, page_size) };
+                let dst = create_file(size);
+                let dst_fd = dst.as_raw_fd();
+
+                b.iter(|| {
+                    let mut written = 0usize;
+                    while written < size {
+                        let n = unsafe {
+                            libc::pwrite(
+                                dst_fd,
+                                (src as *const u8).add(written) as *const c_void,
+                                size - written,
+                                written as libc::off_t,
+                            )
+                        };
+                        assert!(n > 0, "pwrite failed: {}", std::io::Error::last_os_error());
+                        written += n as usize;
+                    }
+                });
+
+                drop(dst);
+                unsafe { libc::munmap(src, size) };
+            },
+        );
+
+        // ── mmap → mmap (memcpy) ──────────────────────────────────────────────
+        group.bench_with_input(
+            BenchmarkId::new("mmap_to_mmap", size),
+            &(size, page_size),
+            |b, &(size, page_size)| {
+                let src = unsafe { anon_mmap(size, page_size) };
+                let dst = unsafe { anon_mmap(size, page_size) };
+
+                b.iter(|| unsafe {
+                    std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, size);
+                });
+
+                unsafe {
+                    libc::munmap(src, size);
+                    libc::munmap(dst, size);
+                }
+            },
+        );
+
+        // ── fd → fd (sendfile) — standard pages only ──────────────────────────
+        if page_size == PageSize::Standard {
             group.bench_with_input(
-                BenchmarkId::new(page_size.label(), size),
-                &(size, page_size),
-                |b, &(size, page_size)| {
-                    let src = unsafe { anon_mmap(size, page_size) };
+                BenchmarkId::new("fd_to_fd", size),
+                &size,
+                |b, &size| {
+                    let src = create_file(size);
                     let dst = create_file(size);
+                    let src_fd = src.as_raw_fd();
                     let dst_fd = dst.as_raw_fd();
 
                     b.iter(|| {
-                        let mut written = 0usize;
-                        while written < size {
+                        let mut offset: libc::off_t = 0;
+                        let mut remaining = size;
+                        while remaining > 0 {
                             let n = unsafe {
-                                libc::pwrite(
-                                    dst_fd,
-                                    (src as *const u8).add(written) as *const c_void,
-                                    size - written,
-                                    written as libc::off_t,
-                                )
+                                libc::sendfile(dst_fd, src_fd, &mut offset, remaining)
                             };
                             assert!(
                                 n > 0,
-                                "pwrite failed: {}",
+                                "sendfile failed: {}",
                                 std::io::Error::last_os_error(),
                             );
-                            written += n as usize;
+                            remaining -= n as usize;
                         }
                     });
 
+                    drop(src);
                     drop(dst);
-                    unsafe { libc::munmap(src, size) };
                 },
             );
         }
-    }
-    group.finish();
-}
 
-/// 3. mmap → mmap: memcpy between two anonymous mmap regions.
-///    This is the baseline for raw memory bandwidth.
-fn bench_mmap_to_mmap(c: &mut Criterion) {
-    let mut group = c.benchmark_group("mmap_to_mmap");
+        // ── memfd → mmap (pread) ──────────────────────────────────────────────
+        group.bench_with_input(
+            BenchmarkId::new("memfd_to_mmap", size),
+            &(size, page_size),
+            |b, &(size, page_size)| {
+                let src_fd = create_memfd(size, page_size);
+                let dst = unsafe { anon_mmap(size, page_size) };
 
-    for size in bench_sizes() {
-        for &page_size in PageSize::ALL {
-            if !page_size.is_size_compatible(size) {
-                continue;
-            }
-            group.throughput(Throughput::Bytes(size as u64));
-            group.bench_with_input(
-                BenchmarkId::new(page_size.label(), size),
-                &(size, page_size),
-                |b, &(size, page_size)| {
-                    let src = unsafe { anon_mmap(size, page_size) };
-                    let dst = unsafe { anon_mmap(size, page_size) };
-
-                    b.iter(|| unsafe {
-                        std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, size);
-                    });
-
-                    unsafe {
-                        libc::munmap(src, size);
-                        libc::munmap(dst, size);
+                b.iter(|| {
+                    let mut done = 0usize;
+                    while done < size {
+                        let n = unsafe {
+                            libc::pread(
+                                src_fd,
+                                (dst as *mut u8).add(done) as *mut c_void,
+                                size - done,
+                                done as libc::off_t,
+                            )
+                        };
+                        assert!(n > 0, "pread failed: {}", std::io::Error::last_os_error());
+                        done += n as usize;
                     }
-                },
-            );
-        }
-    }
-    group.finish();
-}
+                });
 
-/// 4. fd → fd: copy between two real on-disk files via sendfile(2).
-///    No huge page variant — file page-cache always uses regular pages.
-///    Set BENCH_DIR to point at the filesystem you want to measure.
-fn bench_fd_to_fd(c: &mut Criterion) {
-    let mut group = c.benchmark_group("fd_to_fd");
-
-    for size in bench_sizes() {
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            let src = create_file(size);
-            let dst = create_file(size);
-            let src_fd = src.as_raw_fd();
-            let dst_fd = dst.as_raw_fd();
-
-            b.iter(|| {
-                // Pass an explicit offset so sendfile doesn't advance the
-                // file position — no lseek needed between iterations.
-                let mut offset: libc::off_t = 0;
-                let mut remaining = size;
-                while remaining > 0 {
-                    let n =
-                        unsafe { libc::sendfile(dst_fd, src_fd, &mut offset, remaining) };
-                    assert!(n > 0, "sendfile failed: {}", std::io::Error::last_os_error());
-                    remaining -= n as usize;
+                unsafe {
+                    libc::close(src_fd);
+                    libc::munmap(dst, size);
                 }
-            });
-
-            drop(src);
-            drop(dst);
-        });
+            },
+        );
     }
+
     group.finish();
 }
 
-/// 5. memfd → mmap: read from a memfd into an anonymous mmap region via
-///    pread(2). Both source and destination can use huge pages.
-fn bench_memfd_to_mmap(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memfd_to_mmap");
+fn bench_4k(c: &mut Criterion) {
+    bench_copy(c, PageSize::Standard);
+}
 
-    for size in bench_sizes() {
-        for &page_size in PageSize::ALL {
-            if !page_size.is_size_compatible(size) {
-                continue;
-            }
-            group.throughput(Throughput::Bytes(size as u64));
-            group.bench_with_input(
-                BenchmarkId::new(page_size.label(), size),
-                &(size, page_size),
-                |b, &(size, page_size)| {
-                    let src_fd = create_memfd(size, page_size);
-                    let dst = unsafe { anon_mmap(size, page_size) };
-
-                    b.iter(|| {
-                        let mut done = 0usize;
-                        while done < size {
-                            let n = unsafe {
-                                libc::pread(
-                                    src_fd,
-                                    (dst as *mut u8).add(done) as *mut c_void,
-                                    size - done,
-                                    done as libc::off_t,
-                                )
-                            };
-                            assert!(
-                                n > 0,
-                                "pread failed: {}",
-                                std::io::Error::last_os_error(),
-                            );
-                            done += n as usize;
-                        }
-                    });
-
-                    unsafe {
-                        libc::close(src_fd);
-                        libc::munmap(dst, size);
-                    }
-                },
-            );
-        }
-    }
-    group.finish();
+fn bench_2m(c: &mut Criterion) {
+    bench_copy(c, PageSize::Huge);
 }
 
 // ─── Criterion wiring ─────────────────────────────────────────────────────────
@@ -378,11 +343,6 @@ criterion_group! {
         .sample_size(10)
         .measurement_time(Duration::from_secs(30))
         .warm_up_time(Duration::from_secs(3));
-    targets =
-        bench_process_vm_readv,
-        bench_mmap_to_file,
-        bench_mmap_to_mmap,
-        bench_fd_to_fd,
-        bench_memfd_to_mmap
+    targets = bench_4k, bench_2m
 }
 criterion_main!(benches);
