@@ -105,23 +105,29 @@ pub fn create_file(size: usize) -> std::fs::File {
     file
 }
 
-/// Fill a file descriptor with a non-zero repeating byte pattern using
-/// chunked `pwrite` calls, so the caller doesn't need a `size`-byte buffer.
+/// Fill a file descriptor with a non-zero repeating byte pattern.
+///
+/// Uses a temporary `MAP_SHARED` mmap rather than `pwrite` because hugetlbfs
+/// file descriptors (created with `MFD_HUGETLB`) do not support `pwrite` and
+/// return `EINVAL`.  A shared mapping works for both regular files and
+/// hugetlbfs fds.
 pub fn fill_fd(fd: RawFd, size: usize) {
-    const CHUNK: usize = 8 * MB;
-    let buf = vec![0xABu8; CHUNK.min(size)];
-    let mut offset = 0usize;
-    while offset < size {
-        let n_req = (size - offset).min(CHUNK);
-        let n = unsafe {
-            libc::pwrite(
-                fd,
-                buf.as_ptr() as *const libc::c_void,
-                n_req,
-                offset as libc::off_t,
-            )
-        };
-        assert!(n > 0, "fill_fd pwrite failed: {}", std::io::Error::last_os_error());
-        offset += n as usize;
-    }
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    assert_ne!(
+        ptr,
+        libc::MAP_FAILED,
+        "fill_fd mmap failed: {}",
+        std::io::Error::last_os_error(),
+    );
+    unsafe { std::ptr::write_bytes(ptr as *mut u8, 0xAB, size) };
+    unsafe { libc::munmap(ptr, size) };
 }
