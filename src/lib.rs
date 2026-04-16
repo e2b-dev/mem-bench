@@ -104,3 +104,24 @@ pub fn create_file(size: usize) -> std::fs::File {
     file.set_len(size as u64).expect("set_len failed");
     file
 }
+
+/// Fill a file descriptor with a non-zero repeating byte pattern using
+/// chunked `pwrite` calls, so the caller doesn't need a `size`-byte buffer.
+pub fn fill_fd(fd: RawFd, size: usize) {
+    const CHUNK: usize = 8 * MB;
+    let buf = vec![0xABu8; CHUNK.min(size)];
+    let mut offset = 0usize;
+    while offset < size {
+        let n_req = (size - offset).min(CHUNK);
+        let n = unsafe {
+            libc::pwrite(
+                fd,
+                buf.as_ptr() as *const libc::c_void,
+                n_req,
+                offset as libc::off_t,
+            )
+        };
+        assert!(n > 0, "fill_fd pwrite failed: {}", std::io::Error::last_os_error());
+        offset += n as usize;
+    }
+}

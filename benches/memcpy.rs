@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use libc::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE, c_void, iovec};
-use mem_bench::{GB, KB, MB, PageSize, anon_mmap, create_file, create_memfd};
+use mem_bench::{GB, KB, MB, PageSize, anon_mmap, create_file, create_memfd, fill_fd};
 
 // ─── Sizes ────────────────────────────────────────────────────────────────────
 
@@ -101,6 +101,10 @@ impl ChildProcess {
                     if ptr == libc::MAP_FAILED {
                         libc::_exit(1);
                     }
+
+                    // Fill with non-zero data so the parent reads real content.
+                    // memset is async-signal-safe and safe to call post-fork.
+                    libc::memset(ptr, 0xAB, size);
 
                     let ptr_val = ptr as usize;
                     libc::write(
@@ -216,6 +220,7 @@ fn bench_copy(c: &mut Criterion, page_size: PageSize) {
             &(size, page_size),
             |b, &(size, page_size)| {
                 let src = unsafe { anon_mmap(size, page_size) };
+                unsafe { std::ptr::write_bytes(src as *mut u8, 0xAB, size) };
                 let dst = create_file(size);
                 let dst_fd = dst.as_raw_fd();
 
@@ -246,6 +251,7 @@ fn bench_copy(c: &mut Criterion, page_size: PageSize) {
             &(size, page_size),
             |b, &(size, page_size)| {
                 let src = unsafe { anon_mmap(size, page_size) };
+                unsafe { std::ptr::write_bytes(src as *mut u8, 0xAB, size) };
                 let dst = unsafe { anon_mmap(size, page_size) };
 
                 b.iter(|| unsafe {
@@ -266,6 +272,7 @@ fn bench_copy(c: &mut Criterion, page_size: PageSize) {
                 &size,
                 |b, &size| {
                     let src = create_file(size);
+                    fill_fd(src.as_raw_fd(), size);
                     let dst = create_file(size);
                     let src_fd = src.as_raw_fd();
                     let dst_fd = dst.as_raw_fd();
@@ -298,6 +305,7 @@ fn bench_copy(c: &mut Criterion, page_size: PageSize) {
             &(size, page_size),
             |b, &(size, page_size)| {
                 let src_fd = create_memfd(size, page_size);
+                fill_fd(src_fd, size);
                 let dst = unsafe { anon_mmap(size, page_size) };
 
                 b.iter(|| {
