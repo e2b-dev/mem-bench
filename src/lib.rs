@@ -41,6 +41,15 @@ impl PageSize {
     }
 }
 
+impl Into<usize> for PageSize {
+    fn into(self) -> usize {
+        match self {
+            PageSize::Standard => 4096,
+            PageSize::Huge => 2 * 1024 * 1024,
+        }
+    }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Returns the directory used for real on-disk files.

@@ -257,7 +257,16 @@ fn bench_copy(c: &mut Criterion, page_size: PageSize) {
                 let dst = unsafe { anon_mmap(size, page_size) };
 
                 b.iter(|| unsafe {
-                    std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, size);
+                    let mut count = 0;
+                    while count < size {
+                        let len = (size - count).min(page_size.into());
+                        std::ptr::copy_nonoverlapping(
+                            (src as *const u8).add(count),
+                            (dst as *mut u8).add(count),
+                            len,
+                        );
+                        count += len
+                    }
                 });
 
                 unsafe {
