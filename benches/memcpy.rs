@@ -141,7 +141,10 @@ impl ChildProcess {
                 );
                 unsafe { libc::close(pipe_fds[0]) };
 
-                Self { pid: child_pid, remote_ptr: ptr_val as *mut c_void }
+                Self {
+                    pid: child_pid,
+                    remote_ptr: ptr_val as *mut c_void,
+                }
             }
         }
     }
@@ -197,9 +200,8 @@ fn bench_copy(c: &mut Criterion, page_size: PageSize) {
                                 as *mut c_void,
                             iov_len: size - done,
                         };
-                        let n = unsafe {
-                            libc::process_vm_readv(child.pid, &local, 1, &remote, 1, 0)
-                        };
+                        let n =
+                            unsafe { libc::process_vm_readv(child.pid, &local, 1, &remote, 1, 0) };
                         assert!(
                             n > 0,
                             "process_vm_readv failed after {done} bytes: {}",
@@ -267,36 +269,30 @@ fn bench_copy(c: &mut Criterion, page_size: PageSize) {
 
         // ── fd → fd (sendfile) — standard pages only ──────────────────────────
         if page_size == PageSize::Standard {
-            group.bench_with_input(
-                BenchmarkId::new("fd_to_fd", size),
-                &size,
-                |b, &size| {
-                    let src = create_file(size);
-                    fill_fd(src.as_raw_fd(), size);
-                    let dst = create_file(size);
-                    let src_fd = src.as_raw_fd();
-                    let dst_fd = dst.as_raw_fd();
+            group.bench_with_input(BenchmarkId::new("fd_to_fd", size), &size, |b, &size| {
+                let src = create_file(size);
+                fill_fd(src.as_raw_fd(), size);
+                let dst = create_file(size);
+                let src_fd = src.as_raw_fd();
+                let dst_fd = dst.as_raw_fd();
 
-                    b.iter(|| {
-                        let mut offset: libc::off_t = 0;
-                        let mut remaining = size;
-                        while remaining > 0 {
-                            let n = unsafe {
-                                libc::sendfile(dst_fd, src_fd, &mut offset, remaining)
-                            };
-                            assert!(
-                                n > 0,
-                                "sendfile failed: {}",
-                                std::io::Error::last_os_error(),
-                            );
-                            remaining -= n as usize;
-                        }
-                    });
+                b.iter(|| {
+                    let mut offset: libc::off_t = 0;
+                    let mut remaining = size;
+                    while remaining > 0 {
+                        let n = unsafe { libc::sendfile(dst_fd, src_fd, &mut offset, remaining) };
+                        assert!(
+                            n > 0,
+                            "sendfile failed: {}",
+                            std::io::Error::last_os_error(),
+                        );
+                        remaining -= n as usize;
+                    }
+                });
 
-                    drop(src);
-                    drop(dst);
-                },
-            );
+                drop(src);
+                drop(dst);
+            });
         }
 
         // ── memfd → mmap (pread) ──────────────────────────────────────────────

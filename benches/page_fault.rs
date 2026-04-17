@@ -63,7 +63,11 @@ impl Mapping {
         match backing {
             Backing::Anonymous => {
                 let ptr = unsafe { anon_mmap(size, page_size) };
-                Self { ptr, size, _backing: MappingBacking::Anonymous }
+                Self {
+                    ptr,
+                    size,
+                    _backing: MappingBacking::Anonymous,
+                }
             }
 
             Backing::File => {
@@ -89,7 +93,11 @@ impl Mapping {
                     "mmap(file) failed: {}",
                     std::io::Error::last_os_error(),
                 );
-                Self { ptr, size, _backing: MappingBacking::File { _file: file } }
+                Self {
+                    ptr,
+                    size,
+                    _backing: MappingBacking::File { _file: file },
+                }
             }
 
             Backing::Memfd => {
@@ -112,7 +120,11 @@ impl Mapping {
                     "mmap(memfd) failed: {}",
                     std::io::Error::last_os_error(),
                 );
-                Self { ptr, size, _backing: MappingBacking::Memfd(fd) }
+                Self {
+                    ptr,
+                    size,
+                    _backing: MappingBacking::Memfd(fd),
+                }
             }
         }
     }
@@ -153,32 +165,26 @@ fn bench_page_faults(c: &mut Criterion) {
             let total_size = N_FAULT_PAGES * page_bytes;
 
             group.throughput(Throughput::Elements(N_FAULT_PAGES as u64));
-            group.bench_function(
-                BenchmarkId::new(backing.label(), page_size.label()),
-                |b| {
-                    let mapping = Mapping::new(total_size, backing, page_size);
-                    let ptr = mapping.ptr;
+            group.bench_function(BenchmarkId::new(backing.label(), page_size.label()), |b| {
+                let mapping = Mapping::new(total_size, backing, page_size);
+                let ptr = mapping.ptr;
 
-                    b.iter_batched(
-                        // Setup (untimed): strip all pages from the page table.
-                        || unsafe { libc::madvise(ptr, total_size, libc::MADV_DONTNEED) },
-                        // Routine (timed): one write per page triggers a fault.
-                        |_| {
-                            for offset in (0..total_size).step_by(page_bytes) {
-                                unsafe {
-                                    std::ptr::write_volatile(
-                                        (ptr as *mut u8).add(offset),
-                                        0u8,
-                                    );
-                                }
+                b.iter_batched(
+                    // Setup (untimed): strip all pages from the page table.
+                    || unsafe { libc::madvise(ptr, total_size, libc::MADV_DONTNEED) },
+                    // Routine (timed): one write per page triggers a fault.
+                    |_| {
+                        for offset in (0..total_size).step_by(page_bytes) {
+                            unsafe {
+                                std::ptr::write_volatile((ptr as *mut u8).add(offset), 0u8);
                             }
-                        },
-                        criterion::BatchSize::PerIteration,
-                    );
+                        }
+                    },
+                    criterion::BatchSize::PerIteration,
+                );
 
-                    drop(mapping);
-                },
-            );
+                drop(mapping);
+            });
         }
     }
 

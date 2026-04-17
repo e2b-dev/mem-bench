@@ -91,7 +91,12 @@ pub fn create_memfd(size: usize, page_size: PageSize) -> RawFd {
         std::io::Error::last_os_error(),
     );
     let ret = unsafe { libc::ftruncate(fd, size as libc::off_t) };
-    assert_eq!(ret, 0, "ftruncate failed: {}", std::io::Error::last_os_error());
+    assert_eq!(
+        ret,
+        0,
+        "ftruncate failed: {}",
+        std::io::Error::last_os_error()
+    );
     fd
 }
 
@@ -99,8 +104,8 @@ pub fn create_memfd(size: usize, page_size: PageSize) -> RawFd {
 /// The file lives in `bench_dir()` and is unlinked automatically on drop.
 pub fn create_file(size: usize) -> std::fs::File {
     let dir = bench_dir();
-    let file = tempfile::tempfile_in(&dir)
-        .unwrap_or_else(|e| panic!("tempfile_in({dir:?}) failed: {e}"));
+    let file =
+        tempfile::tempfile_in(&dir).unwrap_or_else(|e| panic!("tempfile_in({dir:?}) failed: {e}"));
     file.set_len(size as u64).expect("set_len failed");
     file
 }
