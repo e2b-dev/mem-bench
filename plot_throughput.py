@@ -8,7 +8,7 @@ Plot Criterion benchmark results as throughput and page-fault latency graphs.
 
 Writes two PNGs into the output directory:
 
-  throughput.png  — two stacked subplots (4k pages on top, 2m pages below)
+  throughput.png  — stacked subplots, one per selected page size (4k on top, 2m below)
     X axis : transfer size (log₂ scale)
     Y axis : throughput in GiB/s
     Lines  : one per benchmark function (method), plotted at the median
@@ -19,6 +19,8 @@ Writes two PNGs into the output directory:
     Y axis : latency per page fault in µs  (log scale)
     Bars   : median
     Errors : thick = p25–p75, thin capped = p5–p95
+
+Use --page-size to restrict both plots to a single page size.
 
 The path argument can be any level of the Criterion output tree:
 
@@ -62,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         "-o",
         default="plots",
         help="Directory to write PNG files into (default: plots)",
+    )
+    p.add_argument(
+        "--page-size",
+        choices=["4k", "2m"],
+        default=None,
+        help="Restrict plots to a single page size (default: show both)",
     )
     return p.parse_args()
 
@@ -331,6 +339,14 @@ def main() -> None:
     if not tp_data and not pf_data:
         sys.exit("error: no benchmark data found")
 
+    # Apply page-size filter
+    page_size = args.page_size
+    if page_size is not None:
+        tp_data = {k: v for k, v in tp_data.items() if k == page_size}
+        pf_data = {b: {ps: s for ps, s in sizes.items() if ps == page_size}
+                   for b, sizes in pf_data.items()}
+        pf_data = {b: sizes for b, sizes in pf_data.items() if sizes}
+
     n_tp = sum(len(v) for v in tp_data.values())
     print(
         f"  throughput : {n_tp} series across "
@@ -341,11 +357,15 @@ def main() -> None:
         f"{', '.join(sorted(pf_data)) or '—'}"
     )
 
-    # ── throughput.png: 4k on top, 2m below ──────────────────────────────────
-    fig, axes = plt.subplots(2, 1, figsize=(12, 12))
+    # ── throughput.png: one subplot per page size (4k on top, 2m below) ──────
+    groups = [g for g in ("4k", "2m") if g in tp_data]
+    n_rows = len(groups) or 1
+    fig, axes = plt.subplots(n_rows, 1, figsize=(12, 6 * n_rows))
     fig.subplots_adjust(hspace=0.55)
-    plot_throughput_ax(axes[0], tp_data.get("4k", {}), "4k")
-    plot_throughput_ax(axes[1], tp_data.get("2m", {}), "2m")
+    if n_rows == 1:
+        axes = [axes]
+    for ax, group in zip(axes, groups):
+        plot_throughput_ax(ax, tp_data[group], group)
     out = output_dir / "throughput.png"
     fig.savefig(out, dpi=150)
     plt.close(fig)
